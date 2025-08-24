@@ -1,59 +1,94 @@
+// ============================================================================
+// beamformer_top_spi
+//   - Instantiates 8 beamformer_calc_unit blocks (SPI_ID = 0..7)
+//   - Each instance generates its own 5-byte command stream for its SPI lane
+//   - COL_BASE is assigned as (7 - SPI_ID) * 4, so lanes cover all 32 columns
+//   - az/el/isTX are common; start is broadcast to all lanes
+//   - Per-lane spi_* handshake and per-lane busy/done are exposed
+// ============================================================================
+
 module beamformer_top #(
-    parameter ADDR_WIDTH = 32,
-    parameter DATA_WIDTH = 32,
-    parameter NUM_FIFO   = 8
+    parameter int NUM_SPI = 8
 )(
-    input  wire                  clk,
-    input  wire                  rst_n,
+    input  logic clk,
+    input  logic rst_n,
 
-    // Control
-    input  wire                  start,
-    input  wire [15:0]           az_value,
-    input  wire [15:0]           el_value,
-    input  wire                  isTX,
+    // control (common to all lanes)
+    input  logic start,        // 1-cycle pulse: start a full sweep on all lanes
+    input  logic isTX,         // 1: TX, 0: RX (shared)
+    input  logic [15:0]  az_deg,       // Q9.7 [deg] (shared)
+    input  logic [15:0]  el_deg,       // Q9.7 [deg] (shared)
 
-    // FIFO write interface for 8 SPI channels
-    output wire [ADDR_WIDTH-1:0] fifo_addr   [NUM_FIFO-1:0], // FIFO address for each channel
-    output wire [DATA_WIDTH-1:0] fifo_wdata  [NUM_FIFO-1:0], // FIFO write data for each channel
-    output wire [NUM_FIFO-1:0]   fifo_wen,                   // FIFO write enable for each channel
+    output logic [NUM_SPI-1:0] spi_sclk,
+    output logic [NUM_SPI-1:0] spi_cs_n,
+    output logic [NUM_SPI-1:0] spi_mosi,
 
-    // (Optional) FIFO status
-    input  wire [NUM_FIFO-1:0]   fifo_full,                  // FIFO full flags
+    // per-lane status
+    output logic [NUM_SPI-1:0] busy,       
+    output logic [NUM_SPI-1:0] done,
 
-    // (Optional) Done signal
-    output wire                  done
+    // optional debug taps (directly from calc units)
+    output logic [31:0] phase_turn [NUM_SPI-1:0],  // Q1.31 wrapped
+    output logic [5:0]  phase_idx  [NUM_SPI-1:0]
 );
+    logic spi_wready [NUM_SPI-1:0];
+    logic [7:0] spi_wdata  [NUM_SPI-1:0];
+    logic spi_wvalid [NUM_SPI-1:0];
+    logic spi_wlast  [NUM_SPI-1:0];
 
-    localparam ROWS = 32;
-    localparam COLS_PER_SPI = 4; // Each SPI handles 4 columns
-    
-    reg [5:0] row; // 0~31
-    reg [1:0] col; // 0~3 (local column for this SPI)
-    reg [2:0] spi_id; // Provided as input/parameter
-
+    logic start_d;
+    delay #(.W(1), .N(1)) start_edge_ (.clk(clk), .rst_n(rst_n), .din(start), .dout(start_d));
+    logic start_edge = start & ~start_d;
+    // ------------------------------------------------------------------------
+    // 8 beamformer_calc_unit instances
+    //   SPI_ID = i
+    //   COL_BASE = (7 - i) * 4   → lanes map to 32 columns without overlap
+    // ------------------------------------------------------------------------
     genvar i;
-    generate
-        for (i = 0; i < 8; i = i + 1) begin : calc_unit_gen
+        for (i = 0; i < NUM_SPI; i++) begin : g_lane
+            localparam int LP_SPI_ID   = i;
+            localparam int LP_COL_BASE = (7 - i) * 4;
+
             beamformer_calc_unit #(
-                .ADDR_WIDTH(32),
-                .DATA_WIDTH(32),
-                .SPI_ID(i)
-            ) u_calc_unit (
-                .clk        (clk),
-                .rst_n      (rst_n),
-                .start      (start),
-                .isTX       (isTX),
-                .az_value   (az_value),
-                .el_value   (el_value),
-                .spi_id     (i[2:0]),
-    
-                .fifo_addr  (fifo_addr[i]),
-                .fifo_wdata (fifo_wdata[i]),
-                .fifo_wen   (fifo_wen[i]),
-                .fifo_full  (fifo_full[i]),
-                .done       (/* connect to done logic if needed */)
+                .SPI_ID   (LP_SPI_ID),
+                .ROWS     (32),
+                .COL_BASE (LP_COL_BASE)
+            ) u_calc (
+                .clk         (clk),
+                .rst_n       (rst_n),
+
+                .start       (start_edge),          // broadcast start to all lanes
+                .isTX        (isTX),           // shared TX/RX mode
+                .az_deg      (az_deg),         // shared az (Q9.7)
+                .el_deg      (el_deg),         // shared el (Q9.7)
+
+                .spi_wdata   (spi_wdata [i]),
+                .spi_wvalid  (spi_wvalid[i]),
+                .spi_wready  (spi_wready[i]),
+                .spi_wlast   (spi_wlast [i]),
+
+                .busy        (busy      [i]),
+                .done        (done      [i]),
+
+                .phase_turn  (phase_turn[i]),  // debug
+                .phase_idx   (phase_idx [i])   // debug
             );
         end
-    endgenerate
+
+        for (i = 0; i < NUM_SPI; i++) begin : g_spi
+            spi_master_stream #(
+                .DIV(4)          // SCLK = clk/(2*DIV) → here clk/8
+            ) u_spi (
+                .clk        (clk),
+                .rst_n      (rst_n),
+                .spi_wdata  (spi_wdata[i]),
+                .spi_wvalid (spi_wvalid[i]),
+                .spi_wready (spi_wready[i]),   // backpressure to your byte generator
+                .spi_wlast  (spi_wlast[i]),
+                .sclk       (spi_sclk[i]),
+                .mosi       (spi_mosi[i]),
+                .cs_n       (spi_cs_n[i])
+            );
+        end
 
 endmodule

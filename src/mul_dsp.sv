@@ -49,7 +49,7 @@ module mul_dsp #(
     // ------------------------
     // Output delay alignment
     // ------------------------
-    delay #(.W(WP), .N(ODLY)) u_dly_p  (.clk(clk), .rst_n(rst_n), .din(m1), .dout(p));
+    delay #(.W(48), .N(ODLY)) u_dly_p  (.clk(clk), .rst_n(rst_n), .din(m1), .dout(p));
     delay #(.W(1),  .N(ODLY)) u_dly_vo (.clk(clk), .rst_n(rst_n), .din(v1), .dout(valid_out));
 
 endmodule

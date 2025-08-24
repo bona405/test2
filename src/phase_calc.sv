@@ -121,21 +121,21 @@ module phase_calc #(
     // ------------------------------------------------------------------------
     logic signed [CORDIC_DW:0] sphi_w, cphi_w, sth_w, cth_w;
     logic signed [CORDIC_DW-1:0] sphi_q, cphi_q, cth_q;
-    logic                      err_phi, err_th;
+//    logic                      err_phi, err_th;
 
     cordic_dds #(.DW(CORDIC_DW)) u_cordic_phi (
         .clk     (clk),
         .phase_i (phi_i),
         .sin_o   (sphi_w),
         .cos_o   (cphi_w),
-        .err_o   (err_phi)
+        .err_o   ()
     );
     cordic_dds #(.DW(CORDIC_DW)) u_cordic_th (
         .clk     (clk),
         .phase_i (th_i),
         .sin_o   (sth_w),
         .cos_o   (cth_w),
-        .err_o   (err_th)
+        .err_o   ()
     );
 
     // Keep true Q1.15 by taking lower 16 bits (no extra >>1)
